@@ -187,15 +187,19 @@ def test_index_json_sums(index, benchmark):
     assert compute_sums is not None
 
 
-@pytest.mark.benchmark(min_rounds=2)
-def test_compress_shards(index, tmp_path, benchmark):
+@pytest.mark.benchmark(min_rounds=1)
+@pytest.mark.parametrize("level", (3, 16))
+def test_compress_shards(index, tmp_path, benchmark, level):
     """
     Generate and write-to-disk unpatched repodata shards.
     """
     cache: DateLimitedCache = index.cache_for_subdir("linux-64")  # type: ignore
     # only files in the upstream stage get included in the final index
     upstream = cache.upstream_stage
-    compressor = zstandard.ZstdCompressor()
+    compressor = zstandard.ZstdCompressor(level=level)
+
+    shard_path = tmp_path / "shards"
+    shard_path.mkdir()
 
     @benchmark
     def compress_shards():
@@ -223,7 +227,7 @@ def test_compress_shards(index, tmp_path, benchmark):
 
             reference_hash = hasher.hexdigest()
 
-            (tmp_path / f"{name}-{reference_hash}.msgpack.zst").write_bytes(
+            (shard_path / f"{name}-{reference_hash}.msgpack.zst").write_bytes(
                 compressor.compress(msgpack.packb(shard))  # type: ignore
             )
 
@@ -232,3 +236,29 @@ def test_compress_shards(index, tmp_path, benchmark):
         return shards
 
     assert compress_shards is not None
+
+    compress_dict = zstandard.train_dictionary(
+        2**16,
+        [
+            zstandard.decompress(p.read_bytes())
+            for p in shard_path.glob("*.msgpack.zst")
+        ],
+    )
+
+    assert compress_dict
+
+    compress2 = zstandard.ZstdCompressor(dict_data=compress_dict, level=level)
+    dir2 = tmp_path / "dict_compression"
+    dir2.mkdir()
+
+    for p in shard_path.glob("*.msgpack.zst"):
+        (dir2 / p.name).write_bytes(
+            compress2.compress(zstandard.decompress(p.read_bytes()))
+        )
+
+    original_size = sum(p.stat().st_size for p in shard_path.glob("*.zst"))
+    dict_compression_size = sum(p.stat().st_size for p in dir2.glob("*.zst"))
+
+    print(
+        "Did we save space?", (original_size / dict_compression_size) > 1.1
+    )  # no we did not
