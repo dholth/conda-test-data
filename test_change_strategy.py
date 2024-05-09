@@ -5,8 +5,11 @@ Detect changes per-package in different ways.
 
 import hashlib
 import itertools
-from changing_repodata import DateLimitedCache
+import json
+
 import pytest
+
+from changing_repodata import DateLimitedCache
 
 
 def add_computed(db):
@@ -98,3 +101,27 @@ def test_shard_sums_name_in_stat(index, benchmark, algorithm):
         return sums
 
     assert compute_sums is not None
+
+
+@pytest.mark.parametrize("subdir", ("noarch", "linux-64"))
+@pytest.mark.benchmark(min_rounds=2)
+def test_generate_whole_repodata(index, subdir, benchmark):
+    @benchmark
+    def generate():
+        cache: DateLimitedCache = index.cache_for_subdir(subdir)  # type: ignore
+        packages, packages_conda = cache.indexed_packages_by_timestamp()
+        repodata = {
+            "info": {
+                "subdir": subdir,
+            },
+            "packages": packages,
+            "packages.conda": packages_conda,
+            "removed": [],  # can be added by patch/hotfix process
+            "repodata_version": 1,
+        }
+        print(
+            f"{subdir}/repodata.json has {len(packages)+len(packages_conda)} packages"
+        )
+        return json.dumps(repodata, separators=(":", ","), sort_keys=True)
+
+    assert isinstance(generate, str)
