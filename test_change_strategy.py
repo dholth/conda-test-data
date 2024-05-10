@@ -188,8 +188,9 @@ def test_index_json_sums(index, benchmark):
 
 
 @pytest.mark.benchmark(min_rounds=1)
-@pytest.mark.parametrize("level", (3, 16))
-def test_compress_shards(index, tmp_path, benchmark, level):
+@pytest.mark.parametrize("level", (3,))
+@pytest.mark.parametrize("codec", (json, msgpack))
+def test_compress_shards(index, tmp_path, benchmark, level, codec):
     """
     Generate and write-to-disk unpatched repodata shards.
     """
@@ -200,6 +201,16 @@ def test_compress_shards(index, tmp_path, benchmark, level):
 
     shard_path = tmp_path / "shards"
     shard_path.mkdir()
+
+    def identity(record: dict):
+        return record
+
+    if codec is json:
+        pack_record = identity
+        dumps = lambda x: json.dumps(x).encode()
+    else:
+        pack_record = pack_package_record
+        dumps = lambda x: msgpack.dumps(x)
 
     @benchmark
     def compress_shards():
@@ -223,12 +234,12 @@ def test_compress_shards(index, tmp_path, benchmark, level):
                 hasher.update((path + index_json).encode())
                 record = json.loads(index_json)
                 key = "packages" if path.endswith(".tar.bz2") else "packages.conda"
-                shard[key][path] = pack_package_record(record)
+                shard[key][path] = pack_record(record)
 
             reference_hash = hasher.hexdigest()
 
-            (shard_path / f"{name}-{reference_hash}.msgpack.zst").write_bytes(
-                compressor.compress(msgpack.packb(shard))  # type: ignore
+            (shard_path / f"{name}-{reference_hash}.{codec.__name__}.zst").write_bytes(
+                compressor.compress(dumps(shard))  # type: ignore
             )
 
             shards[name] = shard
@@ -237,12 +248,12 @@ def test_compress_shards(index, tmp_path, benchmark, level):
 
     assert compress_shards is not None
 
+    original_size = sum(p.stat().st_size for p in shard_path.glob("*.zst"))
+    print(f"{original_size} bytes with {codec.__name__}x{level}")
+
     compress_dict = zstandard.train_dictionary(
         2**16,
-        [
-            zstandard.decompress(p.read_bytes())
-            for p in shard_path.glob("*.msgpack.zst")
-        ],
+        [zstandard.decompress(p.read_bytes()) for p in shard_path.glob("*.zst")],
     )
 
     assert compress_dict
@@ -251,14 +262,12 @@ def test_compress_shards(index, tmp_path, benchmark, level):
     dir2 = tmp_path / "dict_compression"
     dir2.mkdir()
 
-    for p in shard_path.glob("*.msgpack.zst"):
+    for p in shard_path.glob("*.zst"):
         (dir2 / p.name).write_bytes(
             compress2.compress(zstandard.decompress(p.read_bytes()))
         )
 
-    original_size = sum(p.stat().st_size for p in shard_path.glob("*.zst"))
     dict_compression_size = sum(p.stat().st_size for p in dir2.glob("*.zst"))
-
     print(
         "Did we save space?", (original_size / dict_compression_size) > 1.1
     )  # no we did not
