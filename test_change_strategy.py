@@ -6,6 +6,7 @@ Detect changes per-package in different ways.
 import hashlib
 import itertools
 import json
+from functools import reduce
 
 import msgpack
 import pytest
@@ -53,6 +54,10 @@ def package_names_in_stat_table():
 
 
 def test_shard_sums(index, benchmark):
+    """
+    Test one method of computing a surrogate checksum that helps us decide
+    whether a package has changed without hashing its entire contents.
+    """
     sums_by_name: dict[str, hashlib._Hash] = {}
     cache: DateLimitedCache = index.cache_for_subdir("linux-64")  # type: ignore
     # only files in the upstream stage get included in the final index
@@ -189,8 +194,10 @@ def test_index_json_sums(index, benchmark):
 
 @pytest.mark.benchmark(min_rounds=1)
 @pytest.mark.parametrize("level", (3,))
-@pytest.mark.parametrize("codec", (json, msgpack))
-def test_compress_shards(index, tmp_path, benchmark, level, codec):
+# @pytest.mark.parametrize("codec", (json, msgpack))
+@pytest.mark.parametrize("codec", (msgpack,))
+@pytest.mark.parametrize("combine_if_smaller_than", (0, 4096, 8192))
+def test_compress_shards(index, tmp_path, benchmark, level, codec, combine_if_smaller_than):
     """
     Generate and write-to-disk unpatched repodata shards.
     """
@@ -213,8 +220,57 @@ def test_compress_shards(index, tmp_path, benchmark, level, codec):
         dumps = lambda x: msgpack.dumps(x)
 
     @benchmark
-    def compress_shards():
-        shards = {}
+    def compress_shards(threshold=combine_if_smaller_than):
+        """
+        threshold: maximum size of combined shards before compression
+        """
+
+        class Buffer:
+            """
+            Merge very small package records into a single shard.
+            """
+
+            def __init__(self, threshold=threshold):
+                self.buffer = {}
+                self.shards = {}
+                self.threshold = threshold
+
+            def add(self, package, shard):
+                buffer_size = len(dumps(self.buffer))
+                new_size = len(dumps(shard))
+                if buffer_size + new_size > self.threshold:
+                    self.flush()
+                self.buffer[package] = shard
+
+            def flush(self):
+                if not self.buffer:
+                    return
+
+                merged = {
+                    "packages": reduce(
+                        dict.__or__, (b["packages"] for b in self.buffer.values())
+                    ),
+                    "packages.conda": reduce(
+                        dict.__or__, (b["packages.conda"] for b in self.buffer.values())
+                    ),
+                }
+                shard = dumps(merged)
+                shard_compressed = compressor.compress(shard)
+                shard_hash = hashlib.sha256(shard_compressed).digest()
+                (
+                    shard_path / f"{name}-{shard_hash.hex()}.{codec.__name__}.zst"
+                ).write_bytes(shard_compressed)
+
+                for package in self.buffer:
+                    self.shards[package] = shard
+
+                # if len(self.buffer) > 1:
+                #     print(f"Combined {','.join(self.buffer)} packages")
+
+                self.buffer = {}
+
+        buffer = Buffer()
+
         for name, rows in itertools.groupby(
             cache.db.execute(
                 """SELECT index_json.name, path, index_json
@@ -227,7 +283,7 @@ def test_compress_shards(index, tmp_path, benchmark, level, codec):
             shard = {"packages": {}, "packages.conda": {}}
             hasher = hashlib.sha256()
             for row in rows:
-                name, path, index_json = row
+                _, path, index_json = row
                 assert path.endswith(
                     (".tar.bz2", ".conda")
                 ), f"Unknown package filename {path}"
@@ -236,20 +292,17 @@ def test_compress_shards(index, tmp_path, benchmark, level, codec):
                 key = "packages" if path.endswith(".tar.bz2") else "packages.conda"
                 shard[key][path] = pack_record(record)
 
-            reference_hash = hasher.hexdigest()
+            buffer.add(name, shard)
 
-            (shard_path / f"{name}-{reference_hash}.{codec.__name__}.zst").write_bytes(
-                compressor.compress(dumps(shard))  # type: ignore
-            )
+        buffer.flush()
 
-            shards[name] = shard
-
-        return shards
+        return buffer.shards
 
     assert compress_shards is not None
 
+    num_shards = len(list(shard_path.glob("*.zst")))
     original_size = sum(p.stat().st_size for p in shard_path.glob("*.zst"))
-    print(f"{original_size} bytes with {codec.__name__}x{level}")
+    print(f"{original_size} bytes with {codec.__name__}x{level} and {num_shards} files and {len(compress_shards)} package names")
 
     compress_dict = zstandard.train_dictionary(
         2**16,
