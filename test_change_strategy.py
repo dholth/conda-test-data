@@ -14,7 +14,6 @@ import zstandard
 
 from changing_repodata import DateLimitedCache
 
-
 TRY_DICTIONARY_COMPRESSION = False
 
 
@@ -263,11 +262,12 @@ def test_compress_shards(
                 shard_compressed = compressor.compress(shard)
                 shard_hash = hashlib.sha256(shard_compressed).digest()
                 (
-                    shard_path / f"{len(self.buffer)}-{shard_hash.hex()}.{codec.__name__}.zst"
+                    shard_path
+                    / f"{len(self.buffer)}-{shard_hash.hex()}.{codec.__name__}.zst"
                 ).write_bytes(shard_compressed)
 
                 for package in self.buffer:
-                    self.shards[package] = shard
+                    self.shards[package] = shard_hash
 
                 # if len(self.buffer) > 1:
                 #     print(f"Combined {','.join(self.buffer)} packages")
@@ -305,6 +305,12 @@ def test_compress_shards(
 
     assert compress_shards is not None
 
+    # write the index
+    repodata_shards = {"info": {"subdir": "linux-64"}, "shards": compress_shards}
+    (shard_path / f"repodata_shards.{codec.__name__}.zst").write_bytes(
+        compressor.compress(dumps(repodata_shards))
+    )
+
     num_shards = len(list(shard_path.glob("*.zst")))
     sizes = [p.stat().st_size for p in shard_path.glob("*.zst")]
     original_size = sum(sizes)
@@ -312,7 +318,9 @@ def test_compress_shards(
         f"{original_size} bytes with {codec.__name__}x{level} and {num_shards} files and {len(compress_shards)} package names"
     )
 
-    import pdb; pdb.set_trace()
+    # import pdb
+    # pdb.set_trace()
+
     if not TRY_DICTIONARY_COMPRESSION:
         return
 
