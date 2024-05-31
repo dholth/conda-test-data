@@ -15,6 +15,9 @@ import zstandard
 from changing_repodata import DateLimitedCache
 
 
+TRY_DICTIONARY_COMPRESSION = False
+
+
 def pack_package_record(record):
     """
     Convert hex checksums to bytes.
@@ -197,7 +200,9 @@ def test_index_json_sums(index, benchmark):
 # @pytest.mark.parametrize("codec", (json, msgpack))
 @pytest.mark.parametrize("codec", (msgpack,))
 @pytest.mark.parametrize("combine_if_smaller_than", (0, 4096, 8192))
-def test_compress_shards(index, tmp_path, benchmark, level, codec, combine_if_smaller_than):
+def test_compress_shards(
+    index, tmp_path, benchmark, level, codec, combine_if_smaller_than
+):
     """
     Generate and write-to-disk unpatched repodata shards.
     """
@@ -301,9 +306,16 @@ def test_compress_shards(index, tmp_path, benchmark, level, codec, combine_if_sm
     assert compress_shards is not None
 
     num_shards = len(list(shard_path.glob("*.zst")))
-    original_size = sum(p.stat().st_size for p in shard_path.glob("*.zst"))
-    print(f"{original_size} bytes with {codec.__name__}x{level} and {num_shards} files and {len(compress_shards)} package names")
+    sizes = [p.stat().st_size for p in shard_path.glob("*.zst")]
+    original_size = sum(sizes)
+    print(
+        f"{original_size} bytes with {codec.__name__}x{level} and {num_shards} files and {len(compress_shards)} package names"
+    )
 
+    if not TRY_DICTIONARY_COMPRESSION:
+        return
+
+    # Nothing we've tried here so far saves at least 10% space:
     compress_dict = zstandard.train_dictionary(
         2**16,
         [zstandard.decompress(p.read_bytes()) for p in shard_path.glob("*.zst")],
