@@ -263,7 +263,7 @@ def test_compress_shards(
                 shard_compressed = compressor.compress(shard)
                 shard_hash = hashlib.sha256(shard_compressed).digest()
                 (
-                    shard_path / f"{name}-{shard_hash.hex()}.{codec.__name__}.zst"
+                    shard_path / f"{len(self.buffer)}-{shard_hash.hex()}.{codec.__name__}.zst"
                 ).write_bytes(shard_compressed)
 
                 for package in self.buffer:
@@ -312,6 +312,7 @@ def test_compress_shards(
         f"{original_size} bytes with {codec.__name__}x{level} and {num_shards} files and {len(compress_shards)} package names"
     )
 
+    import pdb; pdb.set_trace()
     if not TRY_DICTIONARY_COMPRESSION:
         return
 
